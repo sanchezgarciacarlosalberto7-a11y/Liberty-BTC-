@@ -3074,6 +3074,7 @@ def main():
         CommandHandler("cancelar", cancelar)
     ]
 )
+    per_chat=False,
 
     mover_conv = ConversationHandler(
         entry_points=[
