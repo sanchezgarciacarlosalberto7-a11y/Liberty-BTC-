@@ -3062,6 +3062,7 @@ def main():
             pattern=r"^tomar:"
         )
     ],
+    per_chat=False,
     states={
         MONTO_TOMADOR: [
             MessageHandler(
