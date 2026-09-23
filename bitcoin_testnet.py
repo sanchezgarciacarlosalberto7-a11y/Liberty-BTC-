@@ -24,16 +24,6 @@ from bitcointx.core.script import (
 
 import bitcointx.core.secp256k1 as secp256k1
 
-SECP256K1_DLL = (
-    r"C:\Users\carlos\AppData\Local\Programs\Python\Python312"
-    r"\Lib\site-packages\libsecp256k1_0\compiled\win64bit"
-    r"\libsecp256k1-0.dll"
-)
-
-secp256k1._secp256k1 = secp256k1.secp256k1_load_library(
-    SECP256K1_DLL
-)
-
 print("SECP256K1 BITCOINTX: OK")
 
 from bitcointx.core.psbt import PartiallySignedTransaction
