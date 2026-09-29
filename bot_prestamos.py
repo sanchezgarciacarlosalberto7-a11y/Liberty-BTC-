@@ -3039,7 +3039,7 @@ def main():
     pub = ConversationHandler(
     entry_points=[
         CommandHandler("prestamo", iniciar),
-        CommandHandler("ofrecer_prestamo",iniciar_oferta),
+        CommandHandler("ofrecer_prestamo",iniciar),
     ],
 
     states={
