@@ -1112,7 +1112,94 @@ async def monto_tomador(u, c):
 
     await cotizar(a, c)
 
+
+async def enviar_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /enviar_fiat ID_PRESTAMO")
+        return
+    public_id = context.args[0].strip()
+    a = await _obtener_operacion(public_id)
+    if not a or not a["tomador_id"] or not a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
+        return
+    if update.effective_user.id != a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Solo el prestamista registrado puede marcar el fiat como enviado.")
+        return
+    if a["fiat_estado"] in ("ENVIADO", "RECIBIDO", "DEVOLUCION_CONFIRMADA"):
+        await update.effective_message.reply_text(f"Estado fiat actual: {a['fiat_estado']}.")
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    with con() as db:
+        db.execute("UPDATE anuncios SET fiat_estado='ENVIADO', fiat_enviado_fecha=? WHERE public_id=?", (ahora, public_id))
+        db.commit()
+    await context.bot.send_message(a["tomador_id"], f"💸 El prestamista marcó el dinero fiat como enviado para {public_id}. Revisa tu cuenta. Si efectivamente lo recibiste, usa /recibi_fiat {public_id}. Si no llegó, no confirmes y usa /disputa {public_id}.")
+    await update.effective_message.reply_text("✅ Registraste que enviaste el fiat. Esto no verifica la transferencia bancaria.")
+
+async def recibir_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /recibi_fiat ID_PRESTAMO")
+        return
+    public_id = context.args[0].strip()
+    a = await _obtener_operacion(public_id)
+    if not a or not a["tomador_id"] or not a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
+        return
+    if update.effective_user.id != a["tomador_id"]:
+        await update.effective_message.reply_text("❌ Solo el prestatario registrado puede confirmar la recepción del fiat.")
+        return
+    if a["fiat_estado"] != "ENVIADO":
+        await update.effective_message.reply_text("❌ El prestamista aún no ha marcado el fiat como enviado. No confirmes una recepción que no haya ocurrido.")
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    with con() as db:
+        db.execute("UPDATE anuncios SET fiat_estado='RECIBIDO', fiat_recibido_fecha=? WHERE public_id=?", (ahora, public_id))
+        db.commit()
+    await context.bot.send_message(a["solicitante_id"], f"✅ El prestatario confirmó la recepción del fiat para {public_id}. Esta confirmación es una declaración del usuario, no una verificación bancaria.")
+    await update.effective_message.reply_text("✅ Recepción registrada. Guarda el comprobante de la transferencia por si se abre una disputa.")
+
+
+async def quiero_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /quiero_pagar ID_PRESTAMO")
+        return
+    public_id = context.args[0].strip()
+    a = await _obtener_operacion(public_id)
+    if not a or not a["tomador_id"] or not a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
+        return
+    if update.effective_user.id != a["tomador_id"]:
+        await update.effective_message.reply_text("❌ Solo el prestatario registrado puede avisar que quiere devolver el préstamo.")
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    with con() as db:
+        db.execute("UPDATE anuncios SET intencion_pago_fecha=? WHERE public_id=?", (ahora, public_id))
+        db.commit()
+    await context.bot.send_message(a["solicitante_id"], f"🔔 El prestatario ha avisado que quiere devolver el préstamo {public_id}. Coordinen el importe y el medio de devolución por un canal verificable. El aviso no mueve ni libera BTC automáticamente.")
+    await update.effective_message.reply_text("✅ Aviso enviado al prestamista. Este comando no realiza el pago ni libera el colateral.")
+
+async def confirmar_reembolso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /confirmar_reembolso ID_PRESTAMO")
+        return
+    public_id = context.args[0].strip()
+    a = await _obtener_operacion(public_id)
+    if not a or not a["tomador_id"] or not a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
+        return
+    if update.effective_user.id != a["solicitante_id"]:
+        await update.effective_message.reply_text("❌ Solo el prestamista registrado puede confirmar la recepción de la devolución fiat.")
+        return
+    if not a["intencion_pago_fecha"]:
+        await update.effective_message.reply_text("⚠️ El prestatario todavía no ha registrado su intención de pagar.")
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    with con() as db:
+        db.execute("UPDATE anuncios SET fiat_estado='DEVOLUCION_CONFIRMADA', reembolso_confirmado_fecha=? WHERE public_id=?", (ahora, public_id))
+        db.commit()
+    await context.bot.send_message(a["tomador_id"], f"✅ El prestamista confirmó la recepción de la devolución fiat del préstamo {public_id}. Esto no libera automáticamente el colateral BTC.")
+    await update.effective_message.reply_text("✅ Devolución fiat registrada. La liberación del colateral debe ejecutarse y verificarse por separado en el contrato Bitcoin.")
     return ConversationHandler.END
+    
 async def listar(u, c, toma=False):
 
     # ============================================================
