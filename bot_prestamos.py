@@ -3224,6 +3224,8 @@ def main():
     app.add_handler(
         CommandHandler("start", start)
     )
+    app.add_handler(CommandHandler("enviar_fiat", enviar_fiat))
+    app.add_handler(CommandHandler("recibi_fiat", recibir_fiat))
 
     app.add_handler(
         CommandHandler("nodo", nodo)
