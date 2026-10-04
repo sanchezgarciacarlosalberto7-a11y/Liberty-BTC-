@@ -2174,7 +2174,7 @@ async def revisar_depositos_job(context):
                 FROM anuncios
                 WHERE estado='DEPOSITO_BTC_PENDIENTE'
                 AND collateral_txid IS NULL
-                AND datetime(fecha) < datetime('now', '-80 minutes')
+                AND datetime(fecha) < datetime('now', '-12 hours')
                 """
             ).fetchall()
 
@@ -2205,7 +2205,7 @@ async def revisar_depositos_job(context):
 {a['public_id']}
 
 ⚠️ No se recibió el depósito de BTC
-dentro del plazo de 80 minutos.
+dentro del plazo de 12 horas.
 
 📌 Estado:
 DEPOSITO_EXPIRADO
