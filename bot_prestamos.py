@@ -455,6 +455,15 @@ def crear_db():
 
 
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS anuncios_public_id ON anuncios(public_id)")
+    # Altura del último bloque procesado por el detector de depósitos
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS blockchain_scan(
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_height INTEGER NOT NULL
+        )
+    """)
+    c.commit()
+
 def pid(): return "PRE-"+datetime.now(timezone.utc).strftime("%Y%m%d")+"-"+uuid.uuid4().hex.upper()
 def fmt(n): return f"{n:,}".replace(",", ".")
 def monto(texto):
@@ -491,8 +500,13 @@ def tarjeta(a):
         else f"${fmt(a['monto_min'])} - ${fmt(a['monto_max'])}"
     )
 
+    if a['tipo_anuncio'] == 'OFERTA':
+        titulo = "💰 OFERTA DE PRÉSTAMO FIAT"
+    else:
+        titulo = "📢 SOLICITUD DE PRÉSTAMO FIAT"
+
     return (
-        f"💰 SOLICITUD DE PRÉSTAMO FIAT\n"
+        f"{titulo}\n"
         f"💵 Moneda: {a['moneda']}\n"
         f"💰 Monto: {valor}\n"
         f"💳 Pago: {a['metodo_pago']}\n"
@@ -617,7 +631,19 @@ async def nodo(u,c):
     except Exception as e:
         detalle=str(e).replace(BITCOIN_RPC_PASSWORD, "[oculta]")
         await u.message.reply_text("❌ No se pudo conectar a Bitcoin Core.\nDetalle: "+detalle[:180])
-async def iniciar(u,c): c.user_data.clear(); await u.message.reply_text("Moneda (COP, USD):"); return MONEDA
+async def iniciar(u, c, tipo):
+    c.user_data.clear()
+    c.user_data["tipo_anuncio"] = tipo
+    await u.message.reply_text("Moneda (COP, USD):")
+    return MONEDA
+
+
+async def iniciar_prestamo(u, c):
+    return await iniciar(u, c, "SOLICITUD")
+
+
+async def iniciar_oferta(u, c):
+    return await iniciar(u, c, "OFERTA")
 
 MONEDAS_PERMITIDAS = ["COP", "USD", "EUR"]
 
@@ -744,9 +770,10 @@ async def publicar(u,c):
         fecha,
         vencimiento,
         estado,
-        interes
+        interes,
+        tipo_anuncio
     )
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     """,
     (
         i,
@@ -759,13 +786,30 @@ async def publicar(u,c):
         datetime.now(timezone.utc).isoformat(),
         v.strftime("%Y-%m-%d %H:%M"),
         "PUBLICADO",
-        c.user_data['interes']
+        c.user_data['interes'],
+        c.user_data['tipo_anuncio']
     )
 )
         a=x.execute("SELECT * FROM anuncios WHERE public_id=?",(i,)).fetchone()
     m=await c.bot.send_message(CANAL_ANUNCIOS,tarjeta(a),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🙋 Tomar anuncio",callback_data="tomar:"+i)]]))
     with con() as x: x.execute("UPDATE anuncios SET canal_chat_id=?,mensaje_canal_id=? WHERE public_id=?",(str(m.chat_id),m.message_id,i))
     await u.message.reply_text("✅ Publicado. ID: "+i); c.user_data.clear(); return ConversationHandler.END
+
+def es_oferta(a):
+    return a["tipo_anuncio"] == "OFERTA"
+
+
+def prestamista_id(a):
+    if es_oferta(a):
+        return a["solicitante_id"]
+    return a["tomador_id"]
+
+
+def prestatario_id(a):
+    if es_oferta(a):
+        return a["tomador_id"]
+    return a["solicitante_id"]
+
 
 async def cotizar(a, c):
 
@@ -877,7 +921,7 @@ async def cotizar(a, c):
     # ============================================================
 
     await c.bot.send_message(
-        chat_id=a['solicitante_id'],
+        chat_id=prestamista_id(a),
         text=f"""🔐 MULTISIG TESTNET CREADO
 
 🆔 Préstamo:
@@ -907,7 +951,7 @@ No envíes BTC reales.
     # ============================================================
 
     await c.bot.send_message(
-        chat_id=a['tomador_id'],
+        chat_id=prestatario_id(a),
         text=f"""✅ PRÉSTAMO TOMADO
 
 🆔 Contrato:
@@ -1113,6 +1157,14 @@ async def monto_tomador(u, c):
     await cotizar(a, c)
 
 
+async def _obtener_operacion(public_id):
+    with con() as db:
+        return db.execute(
+            "SELECT * FROM anuncios WHERE public_id=?",
+            (public_id,)
+        ).fetchone()
+
+
 async def enviar_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.effective_message.reply_text("Uso: /enviar_fiat ID_PRESTAMO")
@@ -1122,7 +1174,7 @@ async def enviar_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not a or not a["tomador_id"] or not a["solicitante_id"]:
         await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
         return
-    if update.effective_user.id != a["solicitante_id"]:
+    if update.effective_user.id != prestamista_id(a):
         await update.effective_message.reply_text("❌ Solo el prestamista registrado puede marcar el fiat como enviado.")
         return
     if a["fiat_estado"] in ("ENVIADO", "RECIBIDO", "DEVOLUCION_CONFIRMADA"):
@@ -1132,7 +1184,7 @@ async def enviar_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with con() as db:
         db.execute("UPDATE anuncios SET fiat_estado='ENVIADO', fiat_enviado_fecha=? WHERE public_id=?", (ahora, public_id))
         db.commit()
-    await context.bot.send_message(a["tomador_id"], f"💸 El prestamista marcó el dinero fiat como enviado para {public_id}. Revisa tu cuenta. Si efectivamente lo recibiste, usa /recibi_fiat {public_id}. Si no llegó, no confirmes y usa /disputa {public_id}.")
+    await context.bot.send_message(prestatario_id(a), f"💸 El prestamista marcó el dinero fiat como enviado para {public_id}. Revisa tu cuenta. Si efectivamente lo recibiste, usa /recibi_fiat {public_id}. Si no llegó, no confirmes y usa /disputa {public_id}.")
     await update.effective_message.reply_text("✅ Registraste que enviaste el fiat. Esto no verifica la transferencia bancaria.")
 
 async def recibir_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1144,7 +1196,7 @@ async def recibir_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not a or not a["tomador_id"] or not a["solicitante_id"]:
         await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
         return
-    if update.effective_user.id != a["tomador_id"]:
+    if update.effective_user.id != prestatario_id(a):
         await update.effective_message.reply_text("❌ Solo el prestatario registrado puede confirmar la recepción del fiat.")
         return
     if a["fiat_estado"] != "ENVIADO":
@@ -1154,7 +1206,7 @@ async def recibir_fiat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with con() as db:
         db.execute("UPDATE anuncios SET fiat_estado='RECIBIDO', fiat_recibido_fecha=? WHERE public_id=?", (ahora, public_id))
         db.commit()
-    await context.bot.send_message(a["solicitante_id"], f"✅ El prestatario confirmó la recepción del fiat para {public_id}. Esta confirmación es una declaración del usuario, no una verificación bancaria.")
+    await context.bot.send_message(prestamista_id(a), f"✅ El prestatario confirmó la recepción del fiat para {public_id}. Esta confirmación es una declaración del usuario, no una verificación bancaria.")
     await update.effective_message.reply_text("✅ Recepción registrada. Guarda el comprobante de la transferencia por si se abre una disputa.")
 
 
@@ -1167,14 +1219,14 @@ async def quiero_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not a or not a["tomador_id"] or not a["solicitante_id"]:
         await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
         return
-    if update.effective_user.id != a["tomador_id"]:
+    if update.effective_user.id != prestatario_id(a):
         await update.effective_message.reply_text("❌ Solo el prestatario registrado puede avisar que quiere devolver el préstamo.")
         return
     ahora = datetime.now(timezone.utc).isoformat()
     with con() as db:
         db.execute("UPDATE anuncios SET intencion_pago_fecha=? WHERE public_id=?", (ahora, public_id))
         db.commit()
-    await context.bot.send_message(a["solicitante_id"], f"🔔 El prestatario ha avisado que quiere devolver el préstamo {public_id}. Coordinen el importe y el medio de devolución por un canal verificable. El aviso no mueve ni libera BTC automáticamente.")
+    await context.bot.send_message(prestamista_id(a), f"🔔 El prestatario ha avisado que quiere devolver el préstamo {public_id}. Coordinen el importe y el medio de devolución por un canal verificable. El aviso no mueve ni libera BTC automáticamente.")
     await update.effective_message.reply_text("✅ Aviso enviado al prestamista. Este comando no realiza el pago ni libera el colateral.")
 
 async def confirmar_reembolso(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1186,7 +1238,7 @@ async def confirmar_reembolso(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not a or not a["tomador_id"] or not a["solicitante_id"]:
         await update.effective_message.reply_text("❌ Operación inexistente o aún no tomada.")
         return
-    if update.effective_user.id != a["solicitante_id"]:
+    if update.effective_user.id != prestamista_id(a):
         await update.effective_message.reply_text("❌ Solo el prestamista registrado puede confirmar la recepción de la devolución fiat.")
         return
     if not a["intencion_pago_fecha"]:
@@ -1196,7 +1248,7 @@ async def confirmar_reembolso(update: Update, context: ContextTypes.DEFAULT_TYPE
     with con() as db:
         db.execute("UPDATE anuncios SET fiat_estado='DEVOLUCION_CONFIRMADA', reembolso_confirmado_fecha=? WHERE public_id=?", (ahora, public_id))
         db.commit()
-    await context.bot.send_message(a["tomador_id"], f"✅ El prestamista confirmó la recepción de la devolución fiat del préstamo {public_id}. Esto no libera automáticamente el colateral BTC.")
+    await context.bot.send_message(prestatario_id(a), f"✅ El prestamista confirmó la recepción de la devolución fiat del préstamo {public_id}. Esto no libera automáticamente el colateral BTC.")
     await update.effective_message.reply_text("✅ Devolución fiat registrada. La liberación del colateral debe ejecutarse y verificarse por separado en el contrato Bitcoin.")
     return ConversationHandler.END
     
@@ -1603,7 +1655,105 @@ async def disputa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "La disputa ha sido enviada al administrador.\n"
         "La operación queda marcada para revisión."
     )
-async def cancelar(u,c): c.user_data.clear(); await u.message.reply_text("❌ Operación cancelada."); return ConversationHandler.END
+async def cancelar(u, c):
+    if not u.message or not c.args:
+        c.user_data.clear()
+        await u.message.reply_text(
+            "❌ Operación cancelada."
+        )
+        return ConversationHandler.END
+
+    public_id = c.args[0].strip()
+    usuario_id = u.effective_user.id
+
+    with con() as db:
+        a = db.execute(
+            "SELECT * FROM anuncios WHERE public_id=?",
+            (public_id,)
+        ).fetchone()
+
+        if not a:
+            await u.message.reply_text(
+                "❌ No existe una operación con ese ID."
+            )
+            return ConversationHandler.END
+
+        if usuario_id not in (
+            a["solicitante_id"],
+            a["tomador_id"]
+        ):
+            await u.message.reply_text(
+                "🚫 No puedes cancelar una operación "
+                "en la que no participas."
+            )
+            return ConversationHandler.END
+
+        if a["estado"] == "CANCELADO":
+            await u.message.reply_text(
+                "ℹ️ Esta operación ya está cancelada."
+            )
+            return ConversationHandler.END
+
+        if a["collateral_txid"]:
+            await u.message.reply_text(
+                "🚫 Esta operación ya tiene un depósito BTC confirmado. "
+                "No puede cancelarse con /cancelar."
+            )
+            return ConversationHandler.END
+
+        estados_cancelables = (
+            "PUBLICADO",
+            "TOMADO_ESPERANDO_MONTO",
+            "DEPOSITO_BTC_PENDIENTE"
+        )
+
+        if a["estado"] not in estados_cancelables:
+            await u.message.reply_text(
+                f"🚫 La operación está en estado "
+                f"{a['estado']} y no puede cancelarse."
+            )
+            return ConversationHandler.END
+
+        db.execute(
+            """
+            UPDATE anuncios
+            SET estado='CANCELADO'
+            WHERE public_id=?
+            """,
+            (public_id,)
+        )
+        db.commit()
+
+    c.user_data.clear()
+
+    await u.message.reply_text(
+        "✅ OPERACIÓN CERRADA\n\n"
+        f"🆔 ID: {public_id}\n"
+        "📌 Estado: CANCELADO"
+    )
+
+    otro_id = None
+
+    if a["solicitante_id"] and usuario_id != a["solicitante_id"]:
+        otro_id = a["solicitante_id"]
+    elif a["tomador_id"] and usuario_id != a["tomador_id"]:
+        otro_id = a["tomador_id"]
+
+    if otro_id:
+        try:
+            await c.bot.send_message(
+                otro_id,
+                "❌ La operación fue cancelada y cerrada.\n\n"
+                f"🆔 ID: {public_id}\n"
+                "📌 Estado: CANCELADO"
+            )
+        except Exception as e:
+            print(
+                f"⚠️ No se pudo avisar al otro participante "
+                f"{public_id}: {e}"
+            )
+
+    return ConversationHandler.END
 
 async def firmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -2247,16 +2397,17 @@ DEPOSITO_EXPIRADO
                 AND multisig_address IS NOT NULL
                 AND deposito_sats IS NOT NULL
                 ORDER BY id DESC
-                LIMIT 10
                 """
             ).fetchall()
 
-        if not prestamos:
-                      return
+        if prestamos:
+            print(f"🔎 Depósitos pendientes: {len(prestamos)}")
+        else:
+            print("ℹ️ No hay depósitos pendientes; actualizando marcador blockchain.")
 
-        print(f"🔎 Depósitos pendientes: {len(prestamos)}")
+        # 3. Escanear TODOS los depósitos en una sola operación
+        solicitudes = []
 
-        # 3. Revisar cada préstamo
         for a in prestamos:
             print("")
             print("========================================")
@@ -2268,19 +2419,87 @@ DEPOSITO_EXPIRADO
             print("⏳ Vencimiento:", a["vencimiento"])
             print("========================================")
 
-            try:
-                deposito = await bitcoin_testnet.verificar_deposito(
-                    rpc_core,
-                    a["multisig_address"],
-                    a["deposito_sats"]
+            solicitudes.append({
+                "public_id": a["public_id"],
+                "direccion": a["multisig_address"],
+                "sats_requeridos": a["deposito_sats"]
+            })
+
+        # ============================================================
+        # ESCANEO PERSISTENTE DE BLOCKCHAIN
+        # ============================================================
+
+        try:
+            altura_actual = int(await rpc_core("getblockcount"))
+
+            with con() as x:
+                fila = x.execute(
+                    "SELECT last_height FROM blockchain_scan WHERE id=1"
+                ).fetchone()
+
+                if fila is None:
+                    # Primera ejecución: revisar los últimos 12 bloques.
+                    altura_inicio = max(0, altura_actual - 11)
+                    x.execute(
+                        """
+                        INSERT INTO blockchain_scan(id, last_height)
+                        VALUES(1, ?)
+                        """,
+                        (altura_inicio - 1,)
+                    )
+                    x.commit()
+                else:
+                    altura_inicio = int(fila["last_height"]) + 1
+
+            if altura_inicio > altura_actual:
+                print(
+                    f"✅ Blockchain al día: bloque {altura_actual}"
+                )
+                depositos = {}
+            else:
+                print(
+                    f"🔎 Escaneo persistente: "
+                    f"{altura_inicio} → {altura_actual}"
                 )
 
-            except Exception as e:
-                print("❌ Error consultando depósito:", e)
-                continue
+                depositos = await bitcoin_testnet.verificar_depositos(
+                    rpc_core,
+                    solicitudes,
+                    altura_inicio=altura_inicio,
+                    altura_fin=altura_actual
+                )
+
+                # Solo avanzar el marcador si el escaneo terminó completo.
+                with con() as x:
+                    x.execute(
+                        """
+                        INSERT INTO blockchain_scan(id, last_height)
+                        VALUES(1, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            last_height=excluded.last_height
+                        """,
+                        (altura_actual,)
+                    )
+                    x.commit()
+
+                print(
+                    f"✅ Último bloque procesado: {altura_actual}"
+                )
+
+        except Exception as e:
+            print("❌ Error consultando depósitos:", e)
+            return
+
+        # 4. Procesar únicamente los depósitos encontrados
+        for a in prestamos:
+
+            deposito = depositos.get(a["public_id"])
 
             if not deposito:
-                print("⏳ DEPÓSITO NO ENCONTRADO")
+                print(
+                    f"⏳ DEPÓSITO NO ENCONTRADO: "
+                    f"{a['public_id']}"
+                )
                 continue
 
             print("")
@@ -2290,7 +2509,7 @@ DEPOSITO_EXPIRADO
             print("🔢 VOUT:", deposito["vout"])
             print("₿ SATS:", deposito["sats"])
 
-            # 4. Guardar depósito
+            # Guardar depósito
             with con() as x:
                 resultado = x.execute(
                     """
@@ -2310,15 +2529,13 @@ DEPOSITO_EXPIRADO
                     )
                 )
 
-            # Evitar doble procesamiento por jobs solapados
             if resultado.rowcount != 1:
                 print(
-                    f"⚠️ Depósito ya procesado por otra ejecución: "
+                    f"⚠️ Depósito ya procesado: "
                     f"{a['public_id']}"
                 )
-                continue
-
-            # 5. Avisar al prestamista
+                continue        
+ # 5. Avisar al prestamista
             await context.bot.send_message(
                 a["solicitante_id"],
                 f"""✅ COLATERAL CONFIRMADO
@@ -3125,8 +3342,8 @@ def main():
 
     pub = ConversationHandler(
     entry_points=[
-        CommandHandler("prestamo", iniciar),
-        CommandHandler("ofrecer_prestamo",iniciar),
+        CommandHandler("prestamo", iniciar_prestamo),
+        CommandHandler("ofrecer_prestamo", iniciar_oferta),
     ],
 
     states={
@@ -3248,6 +3465,7 @@ def main():
     app.add_handler(CommandHandler("disputa", disputa))
 
 
+    app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(pub)
     app.add_handler(take)
     app.add_handler(mover_conv)

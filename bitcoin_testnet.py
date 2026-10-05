@@ -38,47 +38,258 @@ from bitcointx.core.psbt import (
     PSBT_Output
 )
 
+async def verificar_depositos(rpc, solicitudes, altura_inicio=None, altura_fin=None):
+    """
+    Detecta depósitos P2WSH directamente en los bloques recientes.
 
-async def verificar_deposito(rpc, direccion, sats_requeridos):
+    Ya NO utiliza scantxoutset, porque en este nodo puede tardar
+    más de 120 segundos y provocar timeout.
 
-    resultado = await rpc(
-        "scantxoutset",
-        [
-            "start",
-            [f"addr({direccion})"]
-        ]
-    )
+    Para cada solicitud:
+      1. Obtiene el scriptPubKey correspondiente a la dirección.
+      2. Revisa los bloques recientes.
+      3. Busca una salida con ese scriptPubKey.
+      4. Comprueba que el monto sea exactamente el esperado.
+      5. Comprueba que el UTXO siga sin gastar.
 
-    if not resultado.get("success"):
-        return None
+    Devuelve:
+        {
+            public_id: {
+                "txid": "...",
+                "vout": 0,
+                "sats": 123456,
+                "height": ...,
+                "confirmaciones": ...
+            }
+        }
+    """
 
-    sats_requeridos = int(sats_requeridos)
+    if not solicitudes:
+        return {}
 
-    for utxo in resultado.get("unspents", []):
+    # ============================================================
+    # 1. Obtener scriptPubKey de cada dirección
+    # ============================================================
 
-        sats = int(
-            Decimal(str(utxo["amount"])) * Decimal("100000000")
+    por_script = {}
+
+    for solicitud in solicitudes:
+        direccion = solicitud["direccion"]
+
+        try:
+            info = await rpc(
+                "validateaddress",
+                [direccion]
+            )
+        except Exception as e:
+            print(
+                f"❌ Error validando dirección "
+                f"{direccion}: {e}"
+            )
+            continue
+
+        if not info.get("isvalid"):
+            print(
+                f"❌ Dirección inválida: {direccion}"
+            )
+            continue
+
+        script_pubkey = info.get("scriptPubKey")
+
+        if not script_pubkey:
+            print(
+                f"❌ La dirección no tiene scriptPubKey: "
+                f"{direccion}"
+            )
+            continue
+
+        por_script[script_pubkey.lower()] = solicitud
+
+    if not por_script:
+        return {}
+
+    # ============================================================
+    # 2. Obtener altura actual
+    # ============================================================
+
+    try:
+        altura_actual = int(
+            await rpc("getblockcount")
+        )
+    except Exception as e:
+        print(
+            f"❌ Error obteniendo altura blockchain: {e}"
+        )
+        return {}
+
+    # Si el llamador no proporciona un rango,
+    # mantenemos el comportamiento anterior: últimos 12 bloques.
+    if altura_inicio is None:
+        BLOQUES_A_REVISAR = 12
+        altura_inicio = max(
+            0,
+            altura_actual - BLOQUES_A_REVISAR + 1
         )
 
-        if sats == sats_requeridos:
+    if altura_fin is None:
+        altura_fin = altura_actual
 
-            return {
-                "txid": utxo["txid"],
-                "vout": int(utxo["vout"]),
-                "sats": sats,
-                "height": utxo.get("height"),
-                "confirmaciones": int(
+    altura_inicio = max(0, int(altura_inicio))
+    altura_fin = min(int(altura_fin), altura_actual)
+
+    if altura_inicio > altura_fin:
+        return {}
+
+    encontrados = {}
+
+    # ============================================================
+    # 3. Recorrer bloques recientes
+    # ============================================================
+
+    for altura in range(
+        altura_inicio,
+        altura_fin + 1
+    ):
+
+        try:
+            blockhash = await rpc(
+                "getblockhash",
+                [altura]
+            )
+
+            bloque = await rpc(
+                "getblock",
+                [blockhash, 2]
+            )
+
+        except Exception as e:
+            print(
+                f"❌ Error leyendo bloque {altura}: {e}"
+            )
+            continue
+
+        for tx in bloque.get("tx", []):
+
+            txid = tx.get("txid")
+
+            if not txid:
+                continue
+
+            for vout in tx.get("vout", []):
+
+                indice = int(vout.get("n", -1))
+
+                script_pubkey = (
+                    vout
+                    .get("scriptPubKey", {})
+                    .get("hex", "")
+                    .lower()
+                )
+
+                if not script_pubkey:
+                    continue
+
+                solicitud = por_script.get(
+                    script_pubkey
+                )
+
+                if not solicitud:
+                    continue
+
+                # ==============================================
+                # 4. Comprobar monto exacto
+                # ==============================================
+
+                try:
+                    sats = int(
+                        Decimal(
+                            str(vout["value"])
+                        ) * 100_000_000
+                    )
+                except Exception:
+                    continue
+
+                sats_requeridos = int(
+                    solicitud["sats_requeridos"]
+                )
+
+                if sats != sats_requeridos:
+                    print(
+                        f"⚠️ TX encontrada pero monto incorrecto: "
+                        f"{txid}:{indice} "
+                        f"{sats} sats != "
+                        f"{sats_requeridos} sats"
+                    )
+                    continue
+
+                # ==============================================
+                # 5. Confirmar que el UTXO sigue sin gastar
+                # ==============================================
+
+                try:
+                    utxo = await rpc(
+                        "gettxout",
+                        [
+                            txid,
+                            indice,
+                            True
+                        ]
+                    )
+                except Exception as e:
+                    print(
+                        f"⚠️ No se pudo verificar UTXO "
+                        f"{txid}:{indice}: {e}"
+                    )
+                    continue
+
+                if not utxo:
+                    print(
+                        f"⚠️ Salida encontrada pero ya no "
+                        f"está disponible: {txid}:{indice}"
+                    )
+                    continue
+
+                confirmaciones = int(
                     utxo.get("confirmations", 0)
                 )
-            }
 
-    return None
+                print(
+                    "✅ DEPÓSITO BTC DETECTADO"
+                )
+                print(
+                    f"   Public ID: "
+                    f"{solicitud['public_id']}"
+                )
+                print(
+                    f"   TXID: {txid}"
+                )
+                print(
+                    f"   VOUT: {indice}"
+                )
+                print(
+                    f"   SATS: {sats}"
+                )
+                print(
+                    f"   BLOQUE: {altura}"
+                )
+                print(
+                    f"   CONFIRMACIONES: "
+                    f"{confirmaciones}"
+                )
 
-    print("========== PSBT CREADA ==========")
-    print("ENTRADA:", sats, "sats")
-    print("COMISION:", fee_sats, "sats")
-    print("SALIDA:", monto_salida, "sats")
-    print("=================================")
+                encontrados[
+                    solicitud["public_id"]
+                ] = {
+                    "txid": txid,
+                    "vout": indice,
+                    "sats": sats,
+                    "height": altura,
+                    "confirmaciones": confirmaciones
+                }
+
+    return encontrados
+
+
 async def crear_psbt(
     rpc,
     txid,
