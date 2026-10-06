@@ -756,6 +756,11 @@ async def publicar(u,c):
         if v<=datetime.now(timezone.utc): raise ValueError
     except ValueError: await u.message.reply_text("Fecha inválida o pasada."); return VENCE
     i=pid(); usr=u.effective_user
+    if u.message.sender_chat is not None:
+        await u.message.reply_text(
+            "❌ No puedes publicar anuncios de forma anónima."
+        )
+        return VENCE
     with con() as x:
         x.execute(
     """
@@ -814,13 +819,17 @@ def prestatario_id(a):
 async def cotizar(a, c):
 
     try:
+        monto_base = a['monto_final']
+        interes = float(a.get('interes') or 0)
+        monto_cotizacion = monto_base * (1 + interes / 100)
+
         precio, sats = await yadio_sats(
-            a['monto_final'],
+            monto_cotizacion,
             a['moneda']
         )
 
         ltv = calcular_ltv(
-            a['monto_final'],
+            monto_base,
             sats,
             precio
         )
@@ -2451,7 +2460,28 @@ DEPOSITO_EXPIRADO
                 else:
                     altura_inicio = int(fila["last_height"]) + 1
 
-            if altura_inicio > altura_actual:
+            if prestamos:
+                # Recuperación: aunque el marcador ya haya pasado
+                # por estos bloques, volver a revisar los últimos 100.
+                VENTANA_RECUPERACION = 100
+                altura_inicio = max(
+                    0,
+                    altura_actual - VENTANA_RECUPERACION + 1
+                )
+
+                print(
+                    f"🔎 Escaneo de recuperación: "
+                    f"{altura_inicio} → {altura_actual}"
+                )
+
+                depositos = await bitcoin_testnet.verificar_depositos(
+                    rpc_core,
+                    solicitudes,
+                    altura_inicio=altura_inicio,
+                    altura_fin=altura_actual
+                )
+
+            elif altura_inicio > altura_actual:
                 print(
                     f"✅ Blockchain al día: bloque {altura_actual}"
                 )
@@ -2636,7 +2666,7 @@ async def revisar_ltv_job(context):
                 # LTV NORMAL
                 # =========================
 
-                if False:
+                if ltv < LTV_MAXIMO:
 
                     c.execute("""
                         UPDATE anuncios
@@ -2666,7 +2696,7 @@ async def revisar_ltv_job(context):
                         gracia_inicio = ahora
 
                         gracia_hasta = ahora + timedelta(
-                            minutes=1
+                            days=DIAS_GRACIA
                         )
 
                         c.execute("""
@@ -3380,7 +3410,6 @@ def main():
         CommandHandler("cancelar", cancelar)
     ]
 )
-    per_chat=False,
 
     mover_conv = ConversationHandler(
         entry_points=[
@@ -3465,7 +3494,6 @@ def main():
     app.add_handler(CommandHandler("disputa", disputa))
 
 
-    app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(pub)
     app.add_handler(take)
     app.add_handler(mover_conv)

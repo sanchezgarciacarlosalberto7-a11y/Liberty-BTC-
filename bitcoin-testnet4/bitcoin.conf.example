@@ -1,0 +1,13 @@
+server=1
+listen=0
+fallbackfee=0.0002
+prune=550
+dbcache=100
+maxconnections=4
+
+[testnet4]
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=48332
+rpcuser=CAMBIAR_USUARIO
+rpcpassword=CAMBIAR_CONTRASENA
