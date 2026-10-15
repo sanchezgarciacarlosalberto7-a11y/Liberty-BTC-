@@ -76,13 +76,14 @@ from coincurve import PrivateKey
 
 select_chain_params("bitcoin/testnet")
 
-TOKEN = "[REDACTED]"
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CANAL_ANUNCIOS = "@prestamostest"
+
 DB = "prestamos.db"
-# Deben coincidir con bitcoin.conf. Bitcoin Core se ejecuta en testnet por ahora.
+
 BITCOIN_RPC_URL = "http://127.0.0.1:48332"
-BITCOIN_RPC_USER = "bot_prestamos"
-BITCOIN_RPC_PASSWORD = "[REDACTED]"
+BITCOIN_RPC_USER = os.environ["BITCOIN_RPC_USER"]
+BITCOIN_RPC_PASSWORD = os.environ["BITCOIN_RPC_PASSWORD"]
 MONEDA, MONTO, PAGO, INTERES, VENCE, MONTO_TOMADOR = range(6)
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
