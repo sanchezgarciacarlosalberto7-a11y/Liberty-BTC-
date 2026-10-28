@@ -1,0 +1,13 @@
+
+# Report language
+language: en
+
+# Target directories
+target_directories:
+  - .
+
+# Audit interval
+audit_interval: daily
+
+# PR review
+pr_review: false
